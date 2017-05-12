@@ -24,16 +24,36 @@ class BaseChannel:
 class FileChannel(BaseChannel):
 
     def __init__(self, fpath):
+        self._stdin = sys.stdin
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
         self._fpath = fpath
         self._fd = open(fpath)
 
+        self._iter = self._get()
+
+    def _get(self):
+        for line in self._fd:
+            yield line
+
     def get(self):
-        line = self._fd.readline()
-        msg = line.rstrip() if line else None
-        return msg
+        try:
+            line = next(self._iter)
+        except StopIteration:
+            raise EOFError
+
+        msg = line.rstrip()
+
+        return msg if msg else None
 
     def put(self, msg):
-        pass
+        if not isinstance(msg, (bytes, str)):
+            raise TypeError('parameter "msg" require bytes or str instead '
+                            'of {}'.format(type(msg)))
+        _msg = msg.decode() if isinstance(msg, bytes) else msg
+        line = _msg + '\n'
+        self._stdout.write(line)
+        self._stdout.flush()
 
 
 class PipeChannel(BaseChannel):
@@ -43,9 +63,20 @@ class PipeChannel(BaseChannel):
         self._stdout = sys.stdout
         self._stderr = sys.stderr
 
+        self._iter = self._get()
+
+    def _get(self):
+        for line in self._stdin:
+            yield line
+
     def get(self):
-        line = self._stdin.readline()
+        try:
+            line = next(self._iter)
+        except StopIteration:
+            raise EOFError
+
         msg = line.rstrip()
+
         return msg if msg else None
 
     def put(self, msg):
@@ -86,6 +117,8 @@ class Consumer(object):
         self._preload_msgs_size = self._consumer_number
         self._preload_msgs_queue = queue.Queue()
 
+        self._count = 0
+
     @property
     def consumer_channel(self):
         return self._consumer_channel
@@ -115,33 +148,35 @@ class Consumer(object):
                 continue
             try:
                 self._consumer_exec_func(self, msg)
-            except Exception:
+            except Exception as ex:
                 continue
 
     def run(self):
         self._create_consumer_threads()
         self._start_consumer_threads()
         # start_time = time.time()
-        _empty_x = 0
+        # _empty_x = 0
         while True:
             cur_preload_msgs_size = self._preload_msgs_queue.qsize()
             if cur_preload_msgs_size < self._preload_msgs_size:
                 try:
                     msg = self.consumer_channel.get()
                     if not msg:
-                        _empty_x += 1
-                        if _empty_x > 60:
-                            print('empty msg got 60 times, exit?')
-                            _empty_x = 0
-                            continue
+                        # _empty_x += 1
+                        # if _empty_x > 60:
+                        #     print('empty msg got 60 times, exit?')
+                        #     _empty_x = 0
+                        #     continue
                         time.sleep(0.5)
                         continue
-                    _empty_x = 0
+                    # _empty_x = 0
                     self._preload_msgs_queue.put(msg)
                 except KeyboardInterrupt:
                     # end_time = time.time()
                     # cost_time = end_time - start_time
                     exit(-1)
+                except EOFError:
+                    exit(0)
                 except Exception:
                     continue
 
@@ -169,8 +204,9 @@ if __name__ == '__main__':
     _exec_func = getattr(_module, _exec_func_name)
     _inchan = args.INCHAN
     if _inchan == '-':
-        channel = PipeChannel()
+        _channel = PipeChannel()
     else:
-        channel = FileChannel(_inchan)
-    consumer = Consumer(channel, _exec_func, _consumer_number)
+        _channel = FileChannel(_inchan)
+    consumer = Consumer(_channel, _exec_func, _consumer_number)
     consumer.run()
+
